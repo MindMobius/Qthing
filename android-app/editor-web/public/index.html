@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Qthing</title>
+    <link rel="stylesheet" href="./assets/app.css" />
+  </head>
+  <body>
+    <div
+      id="boot"
+      style="
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        color: rgba(255, 255, 255, 0.8);
+        background: #000;
+      "
+    >
+      正在加载…
+    </div>
+    <div id="root"></div>
+    <script src="./app.iife.js"></script>
+  </body>
+</html>

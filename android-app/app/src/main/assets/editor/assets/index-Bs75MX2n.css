@@ -1,0 +1,1 @@
+:root{--bg: #ffffff;--fg: #000000;--caret: #000000;--selection: rgba(0, 0, 0, .18);--gutter: rgba(0, 0, 0, .08)}:root[data-theme=dark]{--bg: #000000;--fg: #ffffff;--caret: #ffffff;--selection: rgba(255, 255, 255, .22);--gutter: rgba(255, 255, 255, .1)}html,body,#root{height:100%;margin:0;background:var(--bg);color:var(--fg)}#root{display:flex}.editorShell{flex:1;min-width:0}
