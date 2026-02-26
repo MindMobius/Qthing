@@ -1,4 +1,18 @@
 import "./style.css";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  HeroUIProvider,
+  Button,
+  Input,
+  Listbox,
+  ListboxItem,
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter
+} from "@heroui/react";
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { markdown } from "@codemirror/lang-markdown";
@@ -43,7 +57,6 @@ function rpc(method, params) {
   return res.result;
 }
 
-const root = document.getElementById("root");
 const bootEl = document.getElementById("boot");
 function setBoot(message) {
   if (!bootEl) return;
@@ -65,106 +78,6 @@ window.addEventListener("unhandledrejection", (e) => {
   const msg = reason && reason.message ? reason.message : String(reason || "");
   setBoot(msg ? `启动失败：${msg}` : "启动失败");
 });
-const appEl = document.createElement("div");
-appEl.className = "app";
-root.appendChild(appEl);
-
-const sidebarEl = document.createElement("div");
-sidebarEl.className = "sidebar";
-appEl.appendChild(sidebarEl);
-
-const sidebarOverlay = document.createElement("div");
-sidebarOverlay.className = "sidebarOverlay";
-appEl.appendChild(sidebarOverlay);
-
-function toggleSidebar(force) {
-  const isOpen = sidebarEl.dataset.open === "true";
-  const next = force !== undefined ? force : !isOpen;
-  sidebarEl.dataset.open = String(next);
-  sidebarOverlay.dataset.open = String(next);
-}
-
-sidebarOverlay.addEventListener("click", () => toggleSidebar(false));
-
-const sidebarHeaderEl = document.createElement("div");
-sidebarHeaderEl.className = "sidebarHeader";
-sidebarEl.appendChild(sidebarHeaderEl);
-
-const searchInput = document.createElement("input");
-searchInput.className = "search";
-searchInput.placeholder = "搜索文件…";
-sidebarHeaderEl.appendChild(searchInput);
-
-const treeEl = document.createElement("div");
-treeEl.className = "tree";
-sidebarEl.appendChild(treeEl);
-
-const mainEl = document.createElement("div");
-mainEl.className = "main";
-appEl.appendChild(mainEl);
-
-const topbarEl = document.createElement("div");
-topbarEl.className = "topbar";
-mainEl.appendChild(topbarEl);
-
-const btnSidebar = document.createElement("button");
-btnSidebar.className = "btn";
-btnSidebar.textContent = "☰";
-btnSidebar.style.marginRight = "10px";
-// 只在移动端显示，PC 端隐藏（通过 CSS 控制，或者 JS 判断宽度）
-// 这里为了简单，JS 动态控制显示：
-function checkSidebarBtn() {
-  if (window.innerWidth <= 768) {
-    btnSidebar.style.display = "block";
-  } else {
-    btnSidebar.style.display = "none";
-    toggleSidebar(false); // PC 模式重置
-  }
-}
-window.addEventListener("resize", checkSidebarBtn);
-checkSidebarBtn();
-
-btnSidebar.addEventListener("click", () => toggleSidebar());
-topbarEl.appendChild(btnSidebar);
-
-const titleBlockEl = document.createElement("div");
-titleBlockEl.className = "titleBlock";
-topbarEl.appendChild(titleBlockEl);
-
-const titleEl = document.createElement("div");
-titleEl.className = "title";
-titleEl.textContent = "加载中…";
-titleBlockEl.appendChild(titleEl);
-
-const statusEl = document.createElement("div");
-statusEl.className = "status";
-statusEl.textContent = "";
-titleBlockEl.appendChild(statusEl);
-
-const actionsEl = document.createElement("div");
-actionsEl.className = "actions";
-topbarEl.appendChild(actionsEl);
-
-function makeBtn(label, kind) {
-  const b = document.createElement("button");
-  b.className = `btn${kind === "primary" ? " btnPrimary" : ""}`;
-  b.type = "button";
-  b.textContent = label;
-  actionsEl.appendChild(b);
-  return b;
-}
-
-const btnNew = makeBtn("新建", "primary");
-const btnRename = makeBtn("重命名");
-const btnDelete = makeBtn("删除");
-const btnRefresh = makeBtn("刷新");
-const btnRePick = makeBtn("换目录");
-
-const editorShell = document.createElement("div");
-editorShell.className = "editorShell";
-mainEl.appendChild(editorShell);
-
-const themeCompartment = new Compartment();
 
 const lightTheme = EditorView.theme(
   {
@@ -232,19 +145,6 @@ const darkTheme = EditorView.theme(
   { dark: true }
 );
 
-let ignoreChange = false;
-let dirty = false;
-let saving = false;
-let saveError = null;
-let rootUri = null;
-let currentFileUri = null;
-let currentFileName = null;
-let treeCache = new Map();
-let expandedDirs = new Set();
-let selectedUri = null;
-let lastSavedText = "";
-let saveTicket = 0;
-
 function getText(view) {
   return view.state.doc.toString();
 }
@@ -255,288 +155,486 @@ function replaceAll(view, text) {
   });
 }
 
-function setStatus() {
-  if (saveError) {
-    statusEl.textContent = saveError;
-    return;
-  }
-  if (saving) {
-    statusEl.textContent = "保存中…";
-    return;
-  }
-  if (dirty) {
-    statusEl.textContent = "编辑中…";
-    return;
-  }
-  statusEl.textContent = "已保存";
-}
-
-function setTitle() {
-  titleEl.textContent = currentFileName ? clampName(currentFileName) : "未选择文件";
-}
-
-async function ensureDirLoaded(dirUri) {
-  if (!dirUri) return [];
-  if (treeCache.has(dirUri)) return treeCache.get(dirUri);
-  const items = rpc("listChildren", { uri: dirUri }) || [];
-  const normalized =
-    items
-      .map((it) => ({
-        uri: it.uri,
-        name: it.name,
-        isDir: !!it.isDir
-      }))
-      .sort((a, b) => {
-        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-        return (a.name || "").localeCompare(b.name || "", "zh-CN", { sensitivity: "base" });
-      }) || [];
-  treeCache.set(dirUri, normalized);
-  return normalized;
-}
-
-function clearTreeCache() {
-  treeCache = new Map();
-}
-
 function matchQuery(name, query) {
   if (!query) return true;
   return (name || "").toLowerCase().includes(query.toLowerCase());
 }
 
-async function renderTree() {
-  treeEl.innerHTML = "";
-  if (!rootUri) return;
+function App() {
+  const editorRef = useRef(null);
+  const viewRef = useRef(null);
+  const themeCompartmentRef = useRef(null);
+  const treeCacheRef = useRef(new Map());
+  const expandedDirsRef = useRef(new Set());
+  const saveTicketRef = useRef(0);
+  const ignoreChangeRef = useRef(false);
+  const currentFileUriRef = useRef(null);
+  const dirtyRef = useRef(false);
+  const saveErrorRef = useRef(null);
+  const rootUriRef = useRef(null);
+  const lastSavedTextRef = useRef("");
 
-  const query = (searchInput.value || "").trim();
-  const stack = [{ uri: rootUri, depth: 0, name: "根目录", isDir: true }];
-  expandedDirs.add(rootUri);
+  const [currentFileUri, setCurrentFileUri] = useState(null);
+  const [currentFileName, setCurrentFileName] = useState(null);
+  const [selectedUri, setSelectedUri] = useState(null);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [treeItems, setTreeItems] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  const [isDark, setIsDark] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
-  while (stack.length) {
-    const node = stack.pop();
-    if (!node) continue;
-    if (node.depth > 0) {
-      const row = document.createElement("div");
-      row.className = "row";
-      if (selectedUri === node.uri) row.classList.add("rowActive");
-      row.style.paddingLeft = `${10 + node.depth * 14}px`;
+  useEffect(() => {
+    currentFileUriRef.current = currentFileUri;
+  }, [currentFileUri]);
 
-      const marker = document.createElement("div");
-      marker.textContent = node.isDir
-        ? expandedDirs.has(node.uri)
-          ? icon("folderOpen")
-          : icon("folder")
-        : icon("file");
-      row.appendChild(marker);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
 
-      const nameEl = document.createElement("div");
-      nameEl.className = "rowName";
-      nameEl.textContent = node.name;
-      row.appendChild(nameEl);
+  useEffect(() => {
+    saveErrorRef.current = saveError;
+  }, [saveError]);
 
-      treeEl.appendChild(row);
+  const statusText = saveError ? saveError : saving ? "保存中…" : dirty ? "编辑中…" : "已保存";
+  const titleText = currentFileName ? clampName(currentFileName) : "未选择文件";
 
-      row.addEventListener("click", async () => {
-        if (node.isDir) {
-          if (expandedDirs.has(node.uri)) expandedDirs.delete(node.uri);
-          else expandedDirs.add(node.uri);
-          await renderTree();
-          return;
+  const clearTreeCache = useCallback(() => {
+    treeCacheRef.current = new Map();
+  }, []);
+
+  const ensureDirLoaded = useCallback(async (dirUri) => {
+    if (!dirUri) return [];
+    if (treeCacheRef.current.has(dirUri)) return treeCacheRef.current.get(dirUri);
+    const items = rpc("listChildren", { uri: dirUri }) || [];
+    const normalized =
+      items
+        .map((it) => ({
+          uri: it.uri,
+          name: it.name,
+          isDir: !!it.isDir
+        }))
+        .sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          return (a.name || "").localeCompare(b.name || "", "zh-CN", { sensitivity: "base" });
+        }) || [];
+    treeCacheRef.current.set(dirUri, normalized);
+    return normalized;
+  }, []);
+
+  const buildTree = useCallback(async () => {
+    const rootUri = rootUriRef.current;
+    if (!rootUri) {
+      setTreeItems([]);
+      return;
+    }
+    const query = (searchQuery || "").trim();
+    const stack = [{ uri: rootUri, depth: 0, name: "根目录", isDir: true }];
+    expandedDirsRef.current.add(rootUri);
+    const rows = [];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node) continue;
+      if (node.depth > 0) rows.push(node);
+      if (node.isDir && expandedDirsRef.current.has(node.uri)) {
+        const children = await ensureDirLoaded(node.uri);
+        const filtered = query ? children.filter((c) => c.isDir || matchQuery(c.name, query)) : children;
+        for (let i = filtered.length - 1; i >= 0; i--) {
+          const c = filtered[i];
+          stack.push({ uri: c.uri, depth: node.depth + 1, name: c.name, isDir: c.isDir });
         }
-        await openFile(node.uri, node.name);
-      });
-    }
-
-    if (node.isDir && expandedDirs.has(node.uri)) {
-      const children = await ensureDirLoaded(node.uri);
-      const filtered = query ? children.filter((c) => c.isDir || matchQuery(c.name, query)) : children;
-      for (let i = filtered.length - 1; i >= 0; i--) {
-        const c = filtered[i];
-        stack.push({ uri: c.uri, depth: node.depth + 1, name: c.name, isDir: c.isDir });
       }
     }
-  }
-}
+    setTreeItems(rows);
+  }, [ensureDirLoaded, searchQuery]);
 
-async function saveNow(view, reason) {
-  if (!currentFileUri) return;
-  if (!dirty) return;
-
-  const ticket = ++saveTicket;
-  saving = true;
-  saveError = null;
-  setStatus();
-  try {
-    const text = getText(view);
-    rpc("writeText", { uri: currentFileUri, text });
-    rpc("setLastOpenedFileUri", { uri: currentFileUri });
-    if (ticket === saveTicket) {
-      dirty = false;
-      lastSavedText = text;
+  const saveNow = useCallback(async (view) => {
+    const uri = currentFileUriRef.current;
+    if (!uri) return;
+    if (!dirtyRef.current) return;
+    const ticket = ++saveTicketRef.current;
+    setSaving(true);
+    setSaveError(null);
+    saveErrorRef.current = null;
+    try {
+      const text = getText(view);
+      rpc("writeText", { uri, text });
+      rpc("setLastOpenedFileUri", { uri });
+      if (ticket === saveTicketRef.current) {
+        dirtyRef.current = false;
+        setDirty(false);
+        lastSavedTextRef.current = text;
+      }
+    } catch (e) {
+      if (ticket === saveTicketRef.current) {
+        const msg = e && e.message ? e.message : "保存失败";
+        saveErrorRef.current = msg;
+        setSaveError(msg);
+      }
+    } finally {
+      if (ticket === saveTicketRef.current) {
+        setSaving(false);
+      }
     }
-  } catch (e) {
-    if (ticket === saveTicket) {
-      saveError = e && e.message ? e.message : "保存失败";
-    }
-  } finally {
-    if (ticket === saveTicket) {
-      saving = false;
-      setStatus();
-    }
-  }
-}
+  }, []);
 
-const saveLater = debounce((view) => {
-  void saveNow(view, "debounce");
-}, 300);
+  const saveLater = useMemo(
+    () =>
+      debounce((view) => {
+        void saveNow(view);
+      }, 300),
+    [saveNow]
+  );
 
-const updateListener = EditorView.updateListener.of((update) => {
-  if (!update.docChanged) return;
-  if (ignoreChange) return;
-  dirty = true;
-  saveError = null;
-  setStatus();
-  saveLater(update.view);
-});
-
-const state = EditorState.create({
-  doc: "",
-  extensions: [
-    basicSetup,
-    markdown(),
-    EditorView.lineWrapping,
-    updateListener,
-    themeCompartment.of(lightTheme)
-  ]
-});
-
-const view = new EditorView({ state, parent: editorShell });
-
-function setTheme(isDark) {
-  document.documentElement.dataset.theme = isDark ? "dark" : "light";
-  view.dispatch({ effects: themeCompartment.reconfigure(isDark ? darkTheme : lightTheme) });
-}
-
-async function openFile(uri, name) {
-  if (!uri) return;
-  if (uri === currentFileUri && !saveError) return;
-  try {
-    await saveNow(view, "switch");
-  } catch (_) {}
-
-  saving = false;
-  saveError = null;
-  dirty = false;
-  setStatus();
-
-  const text = rpc("readText", { uri }) || "";
-  ignoreChange = true;
-  replaceAll(view, text);
-  ignoreChange = false;
-
-  currentFileUri = uri;
-  currentFileName = name || clampName(name);
-  selectedUri = uri;
-  lastSavedText = text;
-  rpc("setLastOpenedFileUri", { uri });
-  setTitle();
-  setStatus();
-  await renderTree();
-
-  if (window.innerWidth <= 768) {
-    toggleSidebar(false);
-  }
-
-  try {
-    view.focus();
-  } catch (_) {}
-}
-
-async function createAndOpen() {
-  const res = rpc("createInRoot", {});
-  if (!res || !res.uri) throw new Error("新建失败");
-  clearTreeCache();
-  expandedDirs.add(rootUri);
-  await openFile(res.uri, res.name);
-}
-
-async function renameCurrent() {
-  if (!currentFileUri) return;
-  const next = window.prompt("重命名（不含 .md）", (currentFileName || "").replace(/\.md$/i, ""));
-  if (next == null) return;
-  const newName = normalizeMdName(next);
-  const res = rpc("rename", { uri: currentFileUri, name: newName });
-  if (!res || !res.uri) throw new Error("重命名失败");
-  clearTreeCache();
-  currentFileUri = res.uri;
-  currentFileName = res.name || newName;
-  selectedUri = currentFileUri;
-  rpc("setLastOpenedFileUri", { uri: currentFileUri });
-  setTitle();
-  await renderTree();
-}
-
-async function deleteCurrent() {
-  if (!currentFileUri) return;
-  const ok = window.confirm(`删除 ${clampName(currentFileName)}？`);
-  if (!ok) return;
-  rpc("delete", { uri: currentFileUri });
-  currentFileUri = null;
-  currentFileName = null;
-  selectedUri = null;
-  clearTreeCache();
-  await renderTree();
-  try {
-    await createAndOpen();
-  } catch (_) {}
-}
-
-async function refreshAll() {
-  clearTreeCache();
-  await renderTree();
-}
-
-async function rePickFolder() {
-  try {
-    rpc("requestReSelectFolder", {});
-  } catch (_) {}
-}
-
-btnNew.addEventListener("click", () => void createAndOpen());
-btnRename.addEventListener("click", () => void renameCurrent());
-btnDelete.addEventListener("click", () => void deleteCurrent());
-btnRefresh.addEventListener("click", () => void refreshAll());
-btnRePick.addEventListener("click", () => void rePickFolder());
-
-searchInput.addEventListener("input", () => void renderTree());
-
-window.App = {
-  setTheme
-};
-
-async function bootstrap() {
-  try {
-    const state = rpc("getState", {});
-    rootUri = state.rootUri;
-    if (!rootUri) throw new Error("未选择目录");
-    const last = state.lastOpenedFileUri;
-    await renderTree();
-    if (last) {
+  const openFile = useCallback(
+    async (uri, name) => {
+      if (!uri) return;
+      if (uri === currentFileUriRef.current && !saveErrorRef.current) return;
+      const view = viewRef.current;
+      if (!view) return;
       try {
-        const doc = rpc("stat", { uri: last });
-        if (doc && doc.exists && doc.isFile) await openFile(last, doc.name || "未命名.md");
-        else await createAndOpen();
-      } catch (_) {
-        await createAndOpen();
+        await saveNow(view);
+      } catch (_) {}
+      setSaving(false);
+      setSaveError(null);
+      saveErrorRef.current = null;
+      setDirty(false);
+      dirtyRef.current = false;
+      const text = rpc("readText", { uri }) || "";
+      ignoreChangeRef.current = true;
+      replaceAll(view, text);
+      ignoreChangeRef.current = false;
+      currentFileUriRef.current = uri;
+      setCurrentFileUri(uri);
+      setCurrentFileName(name || clampName(name));
+      setSelectedUri(uri);
+      lastSavedTextRef.current = text;
+      rpc("setLastOpenedFileUri", { uri });
+      await buildTree();
+      if (window.innerWidth <= 768) {
+        setIsSidebarOpen(false);
       }
-    } else {
-      await createAndOpen();
+      try {
+        view.focus();
+      } catch (_) {}
+    },
+    [buildTree, saveNow]
+  );
+
+  const createAndOpen = useCallback(async () => {
+    const res = rpc("createInRoot", {});
+    if (!res || !res.uri) throw new Error("新建失败");
+    clearTreeCache();
+    const rootUri = rootUriRef.current;
+    if (rootUri) expandedDirsRef.current.add(rootUri);
+    await openFile(res.uri, res.name);
+  }, [clearTreeCache, openFile]);
+
+  const refreshAll = useCallback(async () => {
+    clearTreeCache();
+    await buildTree();
+  }, [buildTree, clearTreeCache]);
+
+  const rePickFolder = useCallback(async () => {
+    try {
+      rpc("requestReSelectFolder", {});
+    } catch (_) {}
+  }, []);
+
+  const handleRenameOpen = useCallback(() => {
+    if (!currentFileUri) return;
+    const base = (currentFileName || "").replace(/\.md$/i, "");
+    setRenameValue(base);
+    setRenameOpen(true);
+  }, [currentFileName, currentFileUri]);
+
+  const confirmRename = useCallback(async () => {
+    if (!currentFileUri) return;
+    const next = (renameValue || "").trim();
+    if (!next) {
+      setRenameOpen(false);
+      return;
     }
-    hideBoot();
-  } catch (e) {
-    titleEl.textContent = "无法启动";
-    statusEl.textContent = e && e.message ? e.message : "未知错误";
-    setBoot(e && e.message ? `无法启动：${e.message}` : "无法启动");
-  }
+    const newName = normalizeMdName(next);
+    const res = rpc("rename", { uri: currentFileUri, name: newName });
+    if (!res || !res.uri) throw new Error("重命名失败");
+    clearTreeCache();
+    currentFileUriRef.current = res.uri;
+    setCurrentFileUri(res.uri);
+    setCurrentFileName(res.name || newName);
+    setSelectedUri(res.uri);
+    rpc("setLastOpenedFileUri", { uri: res.uri });
+    await buildTree();
+    setRenameOpen(false);
+  }, [buildTree, clearTreeCache, currentFileUri, renameValue]);
+
+  const handleDeleteOpen = useCallback(() => {
+    if (!currentFileUri) return;
+    setDeleteOpen(true);
+  }, [currentFileUri]);
+
+  const confirmDelete = useCallback(async () => {
+    if (!currentFileUri) return;
+    rpc("delete", { uri: currentFileUri });
+    currentFileUriRef.current = null;
+    setCurrentFileUri(null);
+    setCurrentFileName(null);
+    setSelectedUri(null);
+    dirtyRef.current = false;
+    setDirty(false);
+    setSaveError(null);
+    saveErrorRef.current = null;
+    clearTreeCache();
+    await buildTree();
+    try {
+      await createAndOpen();
+    } catch (_) {}
+    setDeleteOpen(false);
+  }, [buildTree, clearTreeCache, createAndOpen, currentFileUri]);
+
+  useEffect(() => {
+    function handleResize() {
+      const mobile = window.innerWidth <= 768;
+      setIsMobile(mobile);
+      setIsSidebarOpen(mobile ? false : true);
+    }
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    const themeCompartment = themeCompartmentRef.current;
+    document.documentElement.dataset.theme = isDark ? "dark" : "light";
+    if (view && themeCompartment) {
+      view.dispatch({ effects: themeCompartment.reconfigure(isDark ? darkTheme : lightTheme) });
+    }
+  }, [isDark]);
+
+  useEffect(() => {
+    window.App = {
+      setTheme: (val) => setIsDark(!!val)
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+    const themeCompartment = new Compartment();
+    themeCompartmentRef.current = themeCompartment;
+    const updateListener = EditorView.updateListener.of((update) => {
+      if (!update.docChanged) return;
+      if (ignoreChangeRef.current) return;
+      setDirty(true);
+      dirtyRef.current = true;
+      setSaveError(null);
+      saveErrorRef.current = null;
+      saveLater(update.view);
+    });
+    const state = EditorState.create({
+      doc: "",
+      extensions: [
+        basicSetup,
+        markdown(),
+        EditorView.lineWrapping,
+        updateListener,
+        themeCompartment.of(lightTheme)
+      ]
+    });
+    const view = new EditorView({ state, parent: editorRef.current });
+    viewRef.current = view;
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+  }, [saveLater]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const bootstrap = async () => {
+      try {
+        const state = rpc("getState", {});
+        rootUriRef.current = state.rootUri;
+        if (!rootUriRef.current) throw new Error("未选择目录");
+        const last = state.lastOpenedFileUri;
+        if (last) {
+          try {
+            const doc = rpc("stat", { uri: last });
+            if (doc && doc.exists && doc.isFile) await openFile(last, doc.name || "未命名.md");
+            else await createAndOpen();
+          } catch (_) {
+            await createAndOpen();
+          }
+        } else {
+          await createAndOpen();
+        }
+        if (!cancelled) hideBoot();
+      } catch (e) {
+        const msg = e && e.message ? e.message : "未知错误";
+        if (!cancelled) setBoot(`无法启动：${msg}`);
+      }
+    };
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [buildTree, createAndOpen, openFile]);
+
+  const itemMap = useMemo(() => new Map(treeItems.map((item) => [item.uri, item])), [treeItems]);
+
+  const handleTreeAction = useCallback(
+    (key) => {
+      const item = itemMap.get(key);
+      if (!item) return;
+      if (item.isDir) {
+        if (expandedDirsRef.current.has(item.uri)) expandedDirsRef.current.delete(item.uri);
+        else expandedDirsRef.current.add(item.uri);
+        void buildTree();
+        return;
+      }
+      void openFile(item.uri, item.name);
+    },
+    [buildTree, itemMap, openFile]
+  );
+
+  return (
+    <div className="app">
+      <div className="sidebar" data-open={isSidebarOpen ? "true" : "false"}>
+        <div className="sidebarHeader">
+          <Input
+            size="sm"
+            radius="sm"
+            placeholder="搜索文件…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+        <div className="tree">
+          <Listbox
+            aria-label="文件树"
+            selectionMode="single"
+            selectedKeys={selectedUri ? new Set([selectedUri]) : new Set()}
+            onAction={handleTreeAction}
+            className="treeList"
+          >
+            {treeItems.map((item) => (
+              <ListboxItem key={item.uri} textValue={item.name}>
+                <div className="treeRow" style={{ paddingLeft: `${8 + item.depth * 14}px` }}>
+                  <span className="treeMarker">
+                    {item.isDir
+                      ? expandedDirsRef.current.has(item.uri)
+                        ? icon("folderOpen")
+                        : icon("folder")
+                      : icon("file")}
+                  </span>
+                  <span className="treeName">{item.name}</span>
+                </div>
+              </ListboxItem>
+            ))}
+          </Listbox>
+        </div>
+      </div>
+      <div
+        className="sidebarOverlay"
+        data-open={isSidebarOpen ? "true" : "false"}
+        onClick={() => setIsSidebarOpen(false)}
+      />
+      <div className="main">
+        <div className="topbar">
+          <div className="topbarLeft">
+            {isMobile ? (
+              <Button size="sm" variant="flat" isIconOnly onPress={() => setIsSidebarOpen((v) => !v)}>
+                ☰
+              </Button>
+            ) : null}
+            <div className="titleBlock">
+              <div className="title">{titleText}</div>
+              <div className="status">{statusText}</div>
+            </div>
+          </div>
+          <div className="actions">
+            <div className="actionsGroup">
+              <Button size="sm" color="primary" onPress={() => void createAndOpen()}>
+                新建
+              </Button>
+            </div>
+            <div className="actionsDivider" />
+            <div className="actionsGroup">
+              <Button size="sm" variant="flat" isDisabled={!currentFileUri} onPress={handleRenameOpen}>
+                重命名
+              </Button>
+              <Button size="sm" variant="flat" isDisabled={!currentFileUri} onPress={handleDeleteOpen}>
+                删除
+              </Button>
+              <Button size="sm" variant="flat" onPress={() => void refreshAll()}>
+                刷新
+              </Button>
+              <Button size="sm" variant="flat" onPress={() => void rePickFolder()}>
+                换目录
+              </Button>
+            </div>
+          </div>
+        </div>
+        <div className="editorShell" ref={editorRef} />
+      </div>
+
+      <Modal isOpen={renameOpen} onOpenChange={setRenameOpen}>
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>重命名</ModalHeader>
+              <ModalBody>
+                <Input
+                  autoFocus
+                  size="sm"
+                  label="文件名（不含 .md）"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                />
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="flat" onPress={onClose}>
+                  取消
+                </Button>
+                <Button color="primary" onPress={() => void confirmRename()}>
+                  确定
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal isOpen={deleteOpen} onOpenChange={setDeleteOpen}>
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>删除文件</ModalHeader>
+              <ModalBody>确定删除 {clampName(currentFileName)}？</ModalBody>
+              <ModalFooter>
+                <Button variant="flat" onPress={onClose}>
+                  取消
+                </Button>
+                <Button color="danger" onPress={() => void confirmDelete()}>
+                  删除
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+    </div>
+  );
 }
 
-bootstrap();
+const root = document.getElementById("root");
+createRoot(root).render(
+  <HeroUIProvider disableAnimation disableRipple>
+    <App />
+  </HeroUIProvider>
+);

@@ -1,9 +1,19 @@
 import { defineConfig } from "vite";
 import { babel } from "@rollup/plugin-babel";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   base: "./",
   publicDir: "public",
+  define: {
+    "process.env.NODE_ENV": '"production"',
+    "process.env": "{}"
+  },
+  plugins: [
+    react({
+      include: [/src\/.*\.js$/]
+    })
+  ],
   esbuild: {
     target: "es2015"
   },
@@ -31,6 +41,12 @@ export default defineConfig({
           babelrc: false,
           configFile: false,
           presets: [
+            [
+              "@babel/preset-react",
+              {
+                runtime: "automatic"
+              }
+            ],
             [
               "@babel/preset-env",
               {
